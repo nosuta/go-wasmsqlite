@@ -8,9 +8,6 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"syscall/js"
-	"time"
-
-	"github.com/sputn1ck/sqlc-wasm/internal"
 )
 
 func init() {
@@ -42,20 +39,26 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		return nil, fmt.Errorf("invalid DSN: %w", err)
 	}
 	
-	worker, queue, err := createWorker(opts)
+	bridge, _, err := createWorker(opts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create worker: %w", err)
+		return nil, fmt.Errorf("failed to create bridge: %w", err)
 	}
 	
-	vfsType, err := openDatabase(queue, opts)
+	// Create bridge adapter
+	adapter, err := NewBridgeAdapter()
 	if err != nil {
-		queue.Close()
+		return nil, fmt.Errorf("failed to create bridge adapter: %w", err)
+	}
+	
+	// Open database through bridge
+	vfsType, err := adapter.Open(opts.File, opts.VFS)
+	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 	
 	conn := &Conn{
-		worker:  worker,
-		queue:   queue,
+		bridge:  bridge,
+		adapter: adapter,
 		opts:    opts,
 		vfsType: vfsType,
 	}
@@ -70,8 +73,8 @@ func (c *Connector) Driver() driver.Driver {
 
 // Conn implements the database/sql/driver.Conn interface
 type Conn struct {
-	worker  js.Value
-	queue   *internal.Queue
+	bridge  js.Value
+	adapter *BridgeAdapter
 	opts    *Options
 	inTx    bool
 	vfsType string
@@ -79,7 +82,7 @@ type Conn struct {
 
 // Prepare implements driver.Conn
 func (c *Conn) Prepare(query string) (driver.Stmt, error) {
-	if c.queue == nil {
+	if c.adapter == nil {
 		return nil, driver.ErrBadConn
 	}
 	
@@ -91,17 +94,10 @@ func (c *Conn) Prepare(query string) (driver.Stmt, error) {
 
 // Close implements driver.Conn
 func (c *Conn) Close() error {
-	if c.queue != nil {
-		// Send close message to Worker
-		request := createJSRequest(0, "close", nil)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		
-		c.queue.SendRequest(ctx, request)
-		
-		// Close the queue (this will terminate the Worker)
-		err := c.queue.Close()
-		c.queue = nil
+	if c.adapter != nil {
+		// Close the database through bridge
+		err := c.adapter.Close()
+		c.adapter = nil
 		return err
 	}
 	return nil
@@ -114,7 +110,7 @@ func (c *Conn) Begin() (driver.Tx, error) {
 
 // BeginTx implements driver.ConnBeginTx
 func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
-	if c.queue == nil {
+	if c.adapter == nil {
 		return nil, driver.ErrBadConn
 	}
 	
@@ -124,15 +120,9 @@ func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 	
 	// SQLite doesn't support read-only transactions or isolation levels in the same way
 	// We'll just start a regular transaction
-	request := createJSRequest(0, "begin", nil)
-	
-	response, err := c.queue.SendRequest(ctx, request)
+	err := c.adapter.Begin()
 	if err != nil {
 		return nil, err
-	}
-	
-	if response.Error != nil {
-		return nil, response.Error
 	}
 	
 	c.inTx = true
@@ -142,86 +132,62 @@ func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 
 // ExecContext implements driver.ExecerContext
 func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	if c.queue == nil {
+	if c.adapter == nil {
 		return nil, driver.ErrBadConn
 	}
 	
-	params := make([]driver.Value, len(args))
+	// Convert params to interface{} slice
+	paramIfaces := make([]interface{}, len(args))
 	for i, arg := range args {
-		params[i] = arg.Value
+		paramIfaces[i] = arg.Value
 	}
 	
-	request := createJSRequest(0, "exec", map[string]interface{}{
-		"sql":    query,
-		"params": params,
-	})
-	
-	response, err := c.queue.SendRequest(ctx, request)
+	rowsAffected, lastInsertID, err := c.adapter.Exec(query, paramIfaces)
 	if err != nil {
 		return nil, err
 	}
 	
-	if response.Error != nil {
-		return nil, response.Error
-	}
-	
-	result, err := parseJSResponse(response.Data)
-	if err != nil {
-		return nil, err
-	}
-	
+	rowsAff := int64(rowsAffected)
+	lastInsID := int64(lastInsertID)
 	return &Result{
-		rowsAffected: result.RowsAffected,
-		lastInsertID: result.LastInsertID,
+		rowsAffected: &rowsAff,
+		lastInsertID: &lastInsID,
 	}, nil
 }
 
 // QueryContext implements driver.QueryerContext  
 func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	if c.queue == nil {
+	if c.adapter == nil {
 		return nil, driver.ErrBadConn
 	}
 	
-	params := make([]driver.Value, len(args))
+	// Convert params to interface{} slice
+	paramIfaces := make([]interface{}, len(args))
 	for i, arg := range args {
-		params[i] = arg.Value
+		paramIfaces[i] = arg.Value
 	}
 	
-	request := createJSRequest(0, "query", map[string]interface{}{
-		"sql":    query,
-		"params": params,
-	})
-	
-	response, err := c.queue.SendRequest(ctx, request)
+	columns, rows, err := c.adapter.Query(query, paramIfaces)
 	if err != nil {
 		return nil, err
 	}
 	
-	if response.Error != nil {
-		return nil, response.Error
-	}
-	
-	result, err := parseJSResponse(response.Data)
-	if err != nil {
-		return nil, err
-	}
-	
-	fmt.Printf("Query returned %d columns: %v\n", len(result.Columns), result.Columns)
-	fmt.Printf("Query returned %d rows\n", len(result.Rows))
-	if len(result.Rows) > 0 {
-		fmt.Printf("First row: %v\n", result.Rows[0])
+	fmt.Printf("Query returned %d columns: %v\n", len(columns), columns)
+	fmt.Printf("Query returned %d rows\n", len(rows))
+	if len(rows) > 0 {
+		fmt.Printf("First row: %v\n", rows[0])
 	}
 	
 	return &Rows{
-		columns: result.Columns,
-		rows:    result.Rows,
+		columns: columns,
+		rows:    rows,
 		pos:     0,
 	}, nil
 }
 
 // Ping implements driver.Pinger
 func (c *Conn) Ping(ctx context.Context) error {
-	if c.queue == nil || !c.queue.IsHealthy() {
+	if c.adapter == nil {
 		return driver.ErrBadConn
 	}
 	
@@ -316,46 +282,18 @@ func (c *Conn) GetVFSType() VFSType {
 
 // Dump exports the database as SQL statements
 func (c *Conn) Dump(ctx context.Context) (string, error) {
-	if c.queue == nil {
+	if c.adapter == nil {
 		return "", driver.ErrBadConn
 	}
 	
-	request := createJSRequest(0, "dump", nil)
-	
-	response, err := c.queue.SendRequest(ctx, request)
-	if err != nil {
-		return "", err
-	}
-	
-	if response.Error != nil {
-		return "", response.Error
-	}
-	
-	// Extract dump from response
-	if !response.Data.IsNull() && !response.Data.IsUndefined() {
-		dump := response.Data.Get("dump")
-		if dump.Truthy() {
-			return dump.String(), nil
-		}
-	}
-	
-	return "", fmt.Errorf("no dump data received")
+	return c.adapter.Dump()
 }
 
 // Load imports SQL statements to restore the database
 func (c *Conn) Load(ctx context.Context, dump string) error {
-	if c.queue == nil {
+	if c.adapter == nil {
 		return driver.ErrBadConn
 	}
 	
-	request := createJSRequest(0, "load", map[string]interface{}{
-		"sql": dump,
-	})
-	
-	response, err := c.queue.SendRequest(ctx, request)
-	if err != nil {
-		return err
-	}
-	
-	return response.Error
+	return c.adapter.Load(dump)
 }

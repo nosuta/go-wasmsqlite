@@ -150,32 +150,22 @@ func parseDSN(dsn string) (*Options, error) {
 	return opts, nil
 }
 
-// createWorker creates a new Web Worker for the database connection
+// createWorker creates a new bridge to SQLite WASM
 func createWorker(opts *Options) (js.Value, *internal.Queue, error) {
-	var worker js.Value
-	var err error
-	
-	if opts.WorkerURL != "" {
-		// Use custom Worker URL
-		worker = js.Global().Get("Worker").New(opts.WorkerURL)
-	} else {
-		// Use embedded Worker
-		worker, err = createEmbeddedWorker()
-		if err != nil {
-			return js.Null(), nil, fmt.Errorf("failed to create embedded worker: %w", err)
-		}
+	// Check if the SQLite bridge is available
+	bridge := js.Global().Get("sqliteBridge")
+	if bridge.IsUndefined() {
+		return js.Null(), nil, fmt.Errorf("sqliteBridge not found - ensure sqlite-bridge.js is loaded")
 	}
 	
-	// Create request queue
-	queue := internal.NewQueue(worker)
-	
-	// Initialize SQLite WASM in the Worker
-	if err := initializeSQLiteWASM(queue); err != nil {
-		queue.Close()
-		return js.Null(), nil, fmt.Errorf("failed to initialize SQLite WASM: %w", err)
+	// Initialize SQLite WASM through the bridge
+	if err := initializeSQLiteBridge(bridge); err != nil {
+		return js.Null(), nil, fmt.Errorf("failed to initialize SQLite bridge: %w", err)
 	}
 	
-	return worker, queue, nil
+	// Return the bridge itself as the "worker" and a nil queue
+	// We'll bypass the queue system entirely
+	return bridge, nil, nil
 }
 
 // createEmbeddedWorker creates a Worker from embedded JavaScript
@@ -218,26 +208,80 @@ func createEmbeddedWorker() (js.Value, error) {
 	return worker, nil
 }
 
-// initializeSQLiteWASM initializes the SQLite WASM module in the Worker
-func initializeSQLiteWASM(queue *internal.Queue) error {
-	// Create request to initialize SQLite WASM
-	request := js.Global().Get("Object").New()
-	request.Set("type", "init")
+// initializeSQLiteBridge initializes the SQLite bridge
+func initializeSQLiteBridge(bridge js.Value) error {
+	// The bridge should already be initialized when it was loaded
+	// We can just check if the init method exists
+	initMethod := bridge.Get("init")
+	if initMethod.IsUndefined() {
+		return fmt.Errorf("sqliteBridge.init method not found")
+	}
 	
-	// Send initialization request
+	// Call init and wait for it to complete
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	
-	response, err := queue.SendRequest(ctx, request)
-	if err != nil {
+	// Create a promise that we can await
+	promise := initMethod.Invoke()
+	if promise.IsUndefined() {
+		return fmt.Errorf("bridge.init() did not return a promise")
+	}
+	
+	// Wait for the promise to resolve
+	done := make(chan error, 1)
+	
+	// Handle promise resolution
+	then := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("promise then handler panicked: %v", r)
+			}
+		}()
+		
+		// Check if result indicates success
+		if len(args) > 0 {
+			result := args[0]
+			if !result.IsUndefined() && !result.Get("ok").IsUndefined() {
+				if !result.Get("ok").Bool() {
+					done <- fmt.Errorf("bridge initialization failed")
+					return nil
+				}
+			}
+		}
+		
+		done <- nil
+		return nil
+	})
+	defer then.Release()
+	
+	// Handle promise rejection
+	catch := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("promise catch handler panicked: %v", r)
+			}
+		}()
+		
+		if len(args) > 0 {
+			err := args[0]
+			done <- fmt.Errorf("bridge initialization failed: %s", err.String())
+		} else {
+			done <- fmt.Errorf("bridge initialization failed with unknown error")
+		}
+		return nil
+	})
+	defer catch.Release()
+	
+	// Attach handlers
+	promise.Call("then", then).Call("catch", catch)
+	
+	// Wait for completion or timeout
+	select {
+	case err := <-done:
 		return err
+	case <-ctx.Done():
+		return fmt.Errorf("bridge initialization timed out")
 	}
-	
-	if response.Error != nil {
-		return response.Error
-	}
-	
-	return nil
 }
 
 // openDatabase opens the database in the Worker and returns the VFS type
