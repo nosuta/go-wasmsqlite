@@ -45,21 +45,31 @@ func (b *BridgeAdapter) Open(filename, vfs string) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	
+	fmt.Printf("🔍 Bridge adapter opening database: filename=%s, vfs=%s\n", filename, vfs)
+	
 	openMethod := b.bridge.Get("open")
 	if openMethod.IsUndefined() {
 		return "", fmt.Errorf("sqliteBridge.open method not found")
 	}
 	
+	fmt.Println("🔍 Found sqliteBridge.open method, calling it...")
+	
 	// Call the open method
 	result, err := b.callAsync(openMethod, filename, vfs)
 	if err != nil {
+		fmt.Printf("❌ Bridge open failed: %v\n", err)
 		return "", err
 	}
+	
+	fmt.Printf("🔍 Bridge open result: %v\n", result)
 	
 	// Extract VFS type from result
 	vfsType := "unknown"
 	if !result.IsUndefined() && !result.Get("vfsType").IsUndefined() {
 		vfsType = result.Get("vfsType").String()
+		fmt.Printf("✅ VFS type extracted: %s\n", vfsType)
+	} else {
+		fmt.Printf("⚠️ vfsType not found in result\n")
 	}
 	
 	return vfsType, nil
@@ -150,7 +160,13 @@ func (b *BridgeAdapter) Query(sql string, params []interface{}) ([]string, [][]i
 						if val.IsNull() {
 							row[j] = nil
 						} else if val.Type() == js.TypeNumber {
-							row[j] = val.Float()
+							num := val.Float()
+							// If it's a whole number, return as int64 to match SQLite integer types
+							if num == float64(int64(num)) {
+								row[j] = int64(num)
+							} else {
+								row[j] = num
+							}
 						} else if val.Type() == js.TypeString {
 							row[j] = val.String()
 						} else if val.Type() == js.TypeBoolean {
@@ -332,7 +348,18 @@ func (b *BridgeAdapter) callAsync(method js.Value, args ...interface{}) (js.Valu
 		
 		errorMsg := "unknown error"
 		if len(args) > 0 {
-			errorMsg = args[0].String()
+			error := args[0]
+			// Try to extract more details from the error
+			if !error.IsUndefined() {
+				if !error.Get("message").IsUndefined() {
+					errorMsg = error.Get("message").String()
+				} else if !error.Get("toString").IsUndefined() {
+					errorMsg = error.Call("toString").String()
+				} else {
+					errorMsg = error.String()
+				}
+			}
+			fmt.Printf("🔍 JavaScript error details: %s\n", errorMsg)
 		}
 		
 		done <- struct {

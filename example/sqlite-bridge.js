@@ -144,26 +144,46 @@ window.sqliteBridge = {
     
     // Try to determine column names
     let columns = [];
-    const selectMatch = sql.match(/SELECT\s+(.+?)\s+FROM/i);
-    if (selectMatch) {
-      const selectClause = selectMatch[1].trim();
-      if (selectClause === '*') {
-        if (sql.toLowerCase().includes('from users')) {
-          columns = ['id', 'username', 'email', 'created_at'];
-        } else if (sql.toLowerCase().includes('from posts')) {
-          columns = ['id', 'user_id', 'title', 'content', 'published', 'created_at'];
-        } else if (rows[0]) {
-          columns = rows[0].map((_, i) => `column${i}`);
+    console.log('Processing SQL for column extraction:', sql);
+    
+    // Handle RETURNING clauses (for INSERT/UPDATE/DELETE ... RETURNING)
+    const returningMatch = sql.match(/RETURNING\s+(.+?)(?:$|;)/mis);
+    if (returningMatch) {
+      const returningClause = returningMatch[1].trim();
+      console.log('Extracted RETURNING clause:', returningClause);
+      columns = returningClause.split(',').map(c => {
+        const parts = c.trim().split(/\s+as\s+/i);
+        if (parts.length > 1) {
+          return parts[1].trim();
         }
-      } else {
-        columns = selectClause.split(',').map(c => {
-          const parts = c.trim().split(/\s+as\s+/i);
-          if (parts.length > 1) {
-            return parts[1].trim();
+        const dotParts = parts[0].split('.');
+        return dotParts[dotParts.length - 1].trim();
+      });
+      console.log('Parsed columns from RETURNING:', columns);
+    } else {
+      console.log('No RETURNING clause found in SQL');
+      // Handle regular SELECT queries
+      const selectMatch = sql.match(/SELECT\s+(.+?)\s+FROM/i);
+      if (selectMatch) {
+        const selectClause = selectMatch[1].trim();
+        if (selectClause === '*') {
+          if (sql.toLowerCase().includes('from users')) {
+            columns = ['id', 'username', 'email', 'created_at'];
+          } else if (sql.toLowerCase().includes('from posts')) {
+            columns = ['id', 'user_id', 'title', 'content', 'published', 'created_at'];
+          } else if (rows[0]) {
+            columns = rows[0].map((_, i) => `column${i}`);
           }
-          const dotParts = parts[0].split('.');
-          return dotParts[dotParts.length - 1].trim();
-        });
+        } else {
+          columns = selectClause.split(',').map(c => {
+            const parts = c.trim().split(/\s+as\s+/i);
+            if (parts.length > 1) {
+              return parts[1].trim();
+            }
+            const dotParts = parts[0].split('.');
+            return dotParts[dotParts.length - 1].trim();
+          });
+        }
       }
     }
     

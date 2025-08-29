@@ -110,16 +110,24 @@ func parseDSN(dsn string) (*Options, error) {
 		return opts, nil
 	}
 	
+	fmt.Printf("🔍 Parsing DSN: %s\n", dsn)
+	
 	values, err := url.ParseQuery(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("invalid DSN: %w", err)
 	}
 	
 	if file := values.Get("file"); file != "" {
+		// Remove any query parameters from the file path
+		if questionMark := strings.Index(file, "?"); questionMark != -1 {
+			file = file[:questionMark]
+		}
+		fmt.Printf("🔍 Extracted file: %s\n", file)
 		opts.File = file
 	}
 	
 	if vfs := values.Get("vfs"); vfs != "" {
+		fmt.Printf("🔍 Extracted VFS: %s\n", vfs)
 		opts.VFS = vfs
 	}
 	

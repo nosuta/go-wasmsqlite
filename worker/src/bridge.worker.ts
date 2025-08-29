@@ -49,37 +49,44 @@ self.onmessage = async (event: MessageEvent<RequestMessage>) => {
     switch (type) {
       case 'init':
         // Initialize SQLite WASM - it will fetch sqlite3.wasm from the same origin
+        const origin = self.location.origin;
+        
+        // Determine base path based on deployment context
+        let basePath = '';
+        if (origin.includes('.github.io')) {
+          // GitHub Pages deployment
+          if (origin === 'https://sputn1ck.github.io') {
+            basePath = 'https://sputn1ck.github.io/sqlc-wasm/';
+          } else {
+            basePath = origin + '/sqlc-wasm/';
+          }
+        } else {
+          // Local development
+          basePath = origin + '/';
+        }
+        
         sqlite3 = await sqlite3InitModule({
           locateFile: (filename: string) => {
+            // Map filenames to their locations
             if (filename === 'sqlite3.wasm') {
-              // The Worker is loaded as a blob URL, so we need to construct 
-              // the correct path. We'll detect the deployment context.
-              const origin = self.location.origin;
-              
-              // For GitHub Pages deployments, we need to include the repo name
-              // We can detect this by checking if we're on a github.io domain
-              if (origin.includes('.github.io')) {
-                // Try to determine the path from the referrer or use a known pattern
-                // Since we're in a blob context, we can't easily get the original path
-                // So we'll use a convention: if it's username.github.io, assume /repo-name/
-                
-                // Specifically handle the known deployment
-                if (origin === 'https://sputn1ck.github.io') {
-                  return 'https://sputn1ck.github.io/sqlc-wasm/sqlite3.wasm';
-                }
-                
-                // For other GitHub Pages deployments, try to use relative path
-                // This won't work from blob context, but it's better than nothing
-                return './sqlite3.wasm';
-              }
-              
-              // For local development (localhost, 127.0.0.1, etc)
-              // Use the origin root since we're typically serving from root
-              return origin + '/sqlite3.wasm';
+              return basePath + 'sqlite3.wasm';
+            } else if (filename === 'sqlite3-opfs-async-proxy.js') {
+              // This is the OPFS worker that SQLite needs
+              return basePath + 'sqlite3-opfs-async-proxy.js';
             }
-            return filename;
+            
+            // Default: try to load from the base path
+            return basePath + filename;
+          },
+          // Provide sqlite3Config to help with OPFS initialization
+          sqlite3Config: {
+            // Set the URL for the OPFS async proxy worker explicitly
+            opfsAsyncProxyUri: basePath + 'sqlite3-opfs-async-proxy.js',
+            // Enable debug output to help diagnose issues
+            debug: (msg: any) => console.log('SQLite Debug:', msg),
+            warn: (msg: any) => console.warn('SQLite Warn:', msg)
           }
-        });
+        } as any);
         
         postSuccess(id);
         break;
