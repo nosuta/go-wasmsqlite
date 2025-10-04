@@ -10,69 +10,58 @@ import (
 
 // APIOO adapts the JavaScript SQLite OO API to work with our Go driver
 type APIOO struct {
-	bridge js.Value
-	mu     sync.Mutex
+	sqlite   js.Value
+	database js.Value
+	mu       sync.Mutex
 }
 
-// NewBridgeAdapter creates a new OO API
+// NewAPIOO creates a new OO API
 func NewAPIOO() (*APIOO, error) {
-	bridge := js.Global().Get("sqliteBridge")
-	if bridge.IsUndefined() {
-		return nil, fmt.Errorf("sqliteBridge not found - ensure sqlite-bridge.js is loaded")
-	}
-
-	return &APIOO{
-		bridge: bridge,
-	}, nil
+	return &APIOO{}, nil
 }
 
-// Init initializes the SQLite bridge
+// Init initializes OO API
 func (b *APIOO) Init() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	initMethod := b.bridge.Get("init")
-	if initMethod.IsUndefined() {
-		return fmt.Errorf("sqliteBridge.init method not found")
+	if !b.sqlite.IsNull() && !b.sqlite.IsUndefined() {
+		return nil
 	}
-
-	// The bridge auto-initializes on load, so we just return success
+	sqlite3InitModule := js.Global().Get("sqlite3InitModule")
+	if sqlite3InitModule.IsUndefined() {
+		return fmt.Errorf("missing sqlite3InitModule")
+	}
+	sqlite, err := callAsync(sqlite3InitModule)
+	if err != nil {
+		return fmt.Errorf("failed to initialize sqlite3: %s", err)
+	}
+	b.sqlite = sqlite
 	return nil
 }
 
 // Open opens a database
-func (b *APIOO) Open(filename, vfs string) (string, error) {
+func (b *APIOO) Open(path, vfs string) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	fmt.Printf("🔍 Bridge adapter opening database: filename=%s, vfs=%s\n", filename, vfs)
-
-	openMethod := b.bridge.Get("open")
-	if openMethod.IsUndefined() {
-		return "", fmt.Errorf("sqliteBridge.open method not found")
-	}
-
-	fmt.Println("🔍 Found sqliteBridge.open method, calling it...")
-
-	// Call the open method
-	result, err := callAsync(openMethod, filename, vfs)
-	if err != nil {
-		fmt.Printf("❌ Bridge open failed: %v\n", err)
+	if err := b.Init(); err != nil {
 		return "", err
 	}
 
-	fmt.Printf("🔍 Bridge open result: %v\n", result)
-
-	// Extract VFS type from result
-	vfsType := "unknown"
-	if !result.IsUndefined() && !result.Get("vfsType").IsUndefined() {
-		vfsType = result.Get("vfsType").String()
-		fmt.Printf("✅ VFS type extracted: %s\n", vfsType)
-	} else {
-		fmt.Printf("⚠️ vfsType not found in result\n")
+	if !b.database.IsNull() && !b.database.IsUndefined() {
+		return "opfs", nil
 	}
 
-	return vfsType, nil
+	opfs := b.sqlite.Get("opfs")
+	if opfs.IsUndefined() {
+		return "", fmt.Errorf("OPFS is not supported")
+	}
+	fmt.Printf("🔍 sqlite3 version: %s\n", b.sqlite.Get("version").Get("libVersion").String())
+
+	db := b.sqlite.Get("oo1").Get("OpfsDb").New(path, "c")
+	if db.IsNull() || db.IsUndefined() {
+		return "", fmt.Errorf("failed to create database")
+	}
+	b.database = db
+	return "opfs", nil
 }
 
 // Exec executes a SQL statement
@@ -80,9 +69,8 @@ func (b *APIOO) Exec(sql string, params []any) (int, int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	execMethod := b.bridge.Get("exec")
-	if execMethod.IsUndefined() {
-		return 0, 0, fmt.Errorf("sqliteBridge.exec method not found")
+	if b.database.IsUndefined() {
+		return 0, 0, fmt.Errorf("missing database")
 	}
 
 	// Convert params to JavaScript array
@@ -91,24 +79,29 @@ func (b *APIOO) Exec(sql string, params []any) (int, int, error) {
 		jsParams.SetIndex(i, toJSValue(param))
 	}
 
-	result, err := callAsync(execMethod, sql, jsParams)
-	if err != nil {
-		return 0, 0, err
+	opts := map[string]any{
+		"sql":  sql,
+		"bind": jsParams,
 	}
+	b.database.Call("exec", opts)
+
+	opts = map[string]any{
+		"sql":         `SELECT changes() as changes, last_insert_rowid() as lastId;`,
+		"returnValue": "resultRows",
+	}
+	result := b.database.Call("exec", opts)
 
 	// Extract rowsAffected and lastInsertId
 	rowsAffected := 0
 	lastInsertId := 0
 
-	if !result.IsUndefined() {
-		if !result.Get("rowsAffected").IsUndefined() {
-			rowsAffected = result.Get("rowsAffected").Int()
-		}
-		if !result.Get("lastInsertId").IsUndefined() {
-			lastInsertId = result.Get("lastInsertId").Int()
+	if !result.IsUndefined() && result.Length() > 0 {
+		res := result.Index(0)
+		if res.Length() == 2 {
+			rowsAffected = res.Index(0).Int()
+			lastInsertId = res.Index(1).Int()
 		}
 	}
-
 	return rowsAffected, lastInsertId, nil
 }
 
@@ -117,9 +110,8 @@ func (b *APIOO) Query(sql string, params []any) ([]string, [][]any, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	queryMethod := b.bridge.Get("query")
-	if queryMethod.IsUndefined() {
-		return nil, nil, fmt.Errorf("sqliteBridge.query method not found")
+	if b.database.IsUndefined() {
+		return nil, nil, fmt.Errorf("missing database")
 	}
 
 	// Convert params to JavaScript array
@@ -128,58 +120,49 @@ func (b *APIOO) Query(sql string, params []any) ([]string, [][]any, error) {
 		jsParams.SetIndex(i, toJSValue(param))
 	}
 
-	result, err := callAsync(queryMethod, sql, jsParams)
-	if err != nil {
-		return nil, nil, err
+	opts := map[string]any{
+		"sql":         sql,
+		"bind":        jsParams,
+		"returnValue": "resultRows",
 	}
+	rowsJS := b.database.Call("exec", opts)
 
-	// Extract columns and rows
-	var columns []string
 	var rows [][]any
-
-	if !result.IsUndefined() {
-		// Get columns
-		columnsJS := result.Get("columns")
-		if !columnsJS.IsUndefined() && columnsJS.Length() > 0 {
-			columns = make([]string, columnsJS.Length())
-			for i := 0; i < columnsJS.Length(); i++ {
-				columns[i] = columnsJS.Index(i).String()
-			}
-		}
-
-		// Get rows
-		rowsJS := result.Get("rows")
-		if !rowsJS.IsUndefined() && rowsJS.Length() > 0 {
-			rows = make([][]any, rowsJS.Length())
-			for i := 0; i < rowsJS.Length(); i++ {
-				rowJS := rowsJS.Index(i)
-				if rowJS.Length() > 0 {
-					row := make([]any, rowJS.Length())
-					for j := 0; j < rowJS.Length(); j++ {
-						val := rowJS.Index(j)
-						if val.IsNull() {
-							row[j] = nil
-						} else if val.Type() == js.TypeNumber {
-							num := val.Float()
-							// If it's a whole number, return as int64 to match SQLite integer types
-							if num == float64(int64(num)) {
-								row[j] = int64(num)
-							} else {
-								row[j] = num
-							}
-						} else if val.Type() == js.TypeString {
-							row[j] = val.String()
-						} else if val.Type() == js.TypeBoolean {
-							row[j] = val.Bool()
+	columnCount := 0
+	if !rowsJS.IsUndefined() && rowsJS.Length() > 0 {
+		rows = make([][]any, rowsJS.Length())
+		for i := 0; i < rowsJS.Length(); i++ {
+			r := rowsJS.Index(i)
+			if r.Length() > 0 {
+				columnCount = r.Length()
+				row := make([]any, r.Length())
+				for j := 0; j < r.Length(); j++ {
+					val := r.Index(j)
+					if val.IsNull() {
+						row[j] = nil
+					} else if val.Type() == js.TypeNumber {
+						num := val.Float()
+						// If it's a whole number, return as int64 to match SQLite integer types
+						if num == float64(int64(num)) {
+							row[j] = int64(num)
 						} else {
-							row[j] = val.String()
+							row[j] = num
 						}
+					} else if val.Type() == js.TypeString {
+						row[j] = val.String()
+					} else if val.Type() == js.TypeBoolean {
+						row[j] = val.Bool()
+					} else {
+						row[j] = val.String()
 					}
-					rows[i] = row
 				}
+				rows[i] = row
 			}
 		}
 	}
+
+	// dummy columns
+	columns := make([]string, columnCount)
 
 	return columns, rows, nil
 }
@@ -189,7 +172,7 @@ func (b *APIOO) Begin() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	beginMethod := b.bridge.Get("begin")
+	beginMethod := b.sqlite.Get("begin")
 	if beginMethod.IsUndefined() {
 		return fmt.Errorf("sqliteBridge.begin method not found")
 	}
@@ -203,7 +186,7 @@ func (b *APIOO) Commit() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	commitMethod := b.bridge.Get("commit")
+	commitMethod := b.sqlite.Get("commit")
 	if commitMethod.IsUndefined() {
 		return fmt.Errorf("sqliteBridge.commit method not found")
 	}
@@ -217,7 +200,7 @@ func (b *APIOO) Rollback() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	rollbackMethod := b.bridge.Get("rollback")
+	rollbackMethod := b.sqlite.Get("rollback")
 	if rollbackMethod.IsUndefined() {
 		return fmt.Errorf("sqliteBridge.rollback method not found")
 	}
@@ -231,7 +214,7 @@ func (b *APIOO) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	closeMethod := b.bridge.Get("close")
+	closeMethod := b.sqlite.Get("close")
 	if closeMethod.IsUndefined() {
 		return fmt.Errorf("sqliteBridge.close method not found")
 	}
@@ -245,7 +228,7 @@ func (b *APIOO) Dump() (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	dumpMethod := b.bridge.Get("dump")
+	dumpMethod := b.sqlite.Get("dump")
 	if dumpMethod.IsUndefined() {
 		return "", fmt.Errorf("sqliteBridge.dump method not found")
 	}
@@ -271,7 +254,7 @@ func (b *APIOO) Load(dump string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	loadMethod := b.bridge.Get("load")
+	loadMethod := b.sqlite.Get("load")
 	if loadMethod.IsUndefined() {
 		return fmt.Errorf("sqliteBridge.load method not found")
 	}

@@ -38,7 +38,10 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		return nil, fmt.Errorf("invalid DSN: %w", err)
 	}
 
-	if opts.API == "worker" || opts.API == "" {
+	switch opts.API {
+	case "":
+		fallthrough
+	case "worker":
 		// Create bridge worker
 		worker, err := NewAPIWorker()
 		if err != nil {
@@ -55,11 +58,22 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 			api:     worker,
 			vfsType: vfsType,
 		}, nil
-	} else if opts.API == "oo" {
-		// TODO:
+	case "oo":
+		oo, err := NewAPIOO()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create bridge adapter: %w", err)
+		}
+		vfsType, err := oo.Open(opts.File, "")
+		if err != nil {
+			return nil, fmt.Errorf("failed to open database: %w", err)
+		}
+		return &Conn{
+			api:     oo,
+			vfsType: vfsType,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported API")
 	}
-
-	return nil, fmt.Errorf("unsupported API")
 }
 
 // Driver returns the underlying driver
