@@ -65,7 +65,12 @@ func (b *APIOO) Open(path, vfs string) (string, error) {
 }
 
 // Exec executes a SQL statement
-func (b *APIOO) Exec(sql string, params []any) (int, int, error) {
+func (b *APIOO) Exec(sql string, params []any) (rowsAffected int, lastInsertId int, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("JavaScript exception: %v", r)
+		}
+	}()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -92,9 +97,6 @@ func (b *APIOO) Exec(sql string, params []any) (int, int, error) {
 	result := b.database.Call("exec", opts)
 
 	// Extract rowsAffected and lastInsertId
-	rowsAffected := 0
-	lastInsertId := 0
-
 	if !result.IsUndefined() && result.Length() > 0 {
 		res := result.Index(0)
 		if res.Length() == 2 {
@@ -102,11 +104,16 @@ func (b *APIOO) Exec(sql string, params []any) (int, int, error) {
 			lastInsertId = res.Index(1).Int()
 		}
 	}
-	return rowsAffected, lastInsertId, nil
+	return rowsAffected, lastInsertId, err
 }
 
 // Query executes a query and returns results
-func (b *APIOO) Query(sql string, params []any) ([]string, [][]any, error) {
+func (b *APIOO) Query(sql string, params []any) (columns []string, rows [][]any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("JavaScript exception: %v", r)
+		}
+	}()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -127,7 +134,6 @@ func (b *APIOO) Query(sql string, params []any) ([]string, [][]any, error) {
 	}
 	rowsJS := b.database.Call("exec", opts)
 
-	var rows [][]any
 	columnCount := 0
 	if !rowsJS.IsUndefined() && rowsJS.Length() > 0 {
 		rows = make([][]any, rowsJS.Length())
@@ -162,13 +168,18 @@ func (b *APIOO) Query(sql string, params []any) ([]string, [][]any, error) {
 	}
 
 	// dummy columns
-	columns := make([]string, columnCount)
+	columns = make([]string, columnCount)
 
-	return columns, rows, nil
+	return columns, rows, err
 }
 
 // Begin starts a transaction
-func (b *APIOO) Begin() error {
+func (b *APIOO) Begin() (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("JavaScript exception: %v", r)
+		}
+	}()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -177,13 +188,16 @@ func (b *APIOO) Begin() error {
 	}
 	b.database.Call("exec", opts)
 
-	// TODO: catch errors
-
-	return nil
+	return err
 }
 
 // Commit commits a transaction
-func (b *APIOO) Commit() error {
+func (b *APIOO) Commit() (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("JavaScript exception: %v", r)
+		}
+	}()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -192,13 +206,16 @@ func (b *APIOO) Commit() error {
 	}
 	b.database.Call("exec", opts)
 
-	// TODO: catch errors
-
-	return nil
+	return err
 }
 
 // Rollback rolls back a transaction
-func (b *APIOO) Rollback() error {
+func (b *APIOO) Rollback() (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("JavaScript exception: %v", r)
+		}
+	}()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -207,21 +224,22 @@ func (b *APIOO) Rollback() error {
 	}
 	b.database.Call("exec", opts)
 
-	// TODO: catch errors
-
-	return nil
+	return err
 }
 
 // Close closes the database connection
-func (b *APIOO) Close() error {
+func (b *APIOO) Close() (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("JavaScript exception: %v", r)
+		}
+	}()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	b.database.Call("close")
 
-	// TODO: catch errors
-
-	return nil
+	return err
 }
 
 // Dump exports the database as SQL statements
