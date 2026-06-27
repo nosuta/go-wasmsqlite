@@ -28,8 +28,6 @@ const server = http.createServer((req, res) => {
   const sqliteFiles = [
     'sqlite3.wasm',
     'sqlite3.js',
-    'sqlite3-worker1.js',
-    'sqlite3-worker1-promiser.js',
     'sqlite3-opfs-async-proxy.js'
   ];
 

@@ -9,9 +9,10 @@ import (
 	"path/filepath"
 )
 
-// Embed all assets and bridge files
+// Embed all SQLite WASM assets. Only the OO direct route is used at runtime,
+// so the Worker1 Promiser files are no longer published by this module.
 //
-//go:embed assets/* bridge/sqlite-bridge.js
+//go:embed assets/*
 var embeddedAssets embed.FS
 
 // ExtractAssets extracts all embedded SQLite WASM assets to the specified directory.
@@ -100,15 +101,6 @@ func GetSQLiteWASM() ([]byte, error) {
 // GetSQLiteJS returns the SQLite JavaScript wrapper.
 func GetSQLiteJS() (string, error) {
 	data, err := GetAsset("assets/sqlite3.js")
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
-}
-
-// GetBridgeJS returns the handcrafted JavaScript bridge.
-func GetBridgeJS() (string, error) {
-	data, err := GetAsset("bridge/sqlite-bridge.js")
 	if err != nil {
 		return "", err
 	}

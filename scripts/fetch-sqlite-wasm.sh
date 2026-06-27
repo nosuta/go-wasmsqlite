@@ -47,12 +47,12 @@ fi
 echo "📂 Extracting files..."
 unzip -q "$TEMP_DIR/sqlite-wasm.zip" -d "$TEMP_DIR"
 
-# Copy only the required files
+# Copy only the required files. The OO direct route used by this driver
+# only needs the core SQLite WASM + the OPFS async proxy; the deprecated
+# Worker1 / Promiser files are intentionally not published.
 echo "📋 Copying required files to $ASSETS_DIR..."
 cp "$TEMP_DIR/sqlite-wasm-${SQLITE_VERSION}/jswasm/sqlite3.js" "$ASSETS_DIR/"
 cp "$TEMP_DIR/sqlite-wasm-${SQLITE_VERSION}/jswasm/sqlite3.wasm" "$ASSETS_DIR/"
-cp "$TEMP_DIR/sqlite-wasm-${SQLITE_VERSION}/jswasm/sqlite3-worker1.js" "$ASSETS_DIR/"
-cp "$TEMP_DIR/sqlite-wasm-${SQLITE_VERSION}/jswasm/sqlite3-worker1-promiser.js" "$ASSETS_DIR/"
 cp "$TEMP_DIR/sqlite-wasm-${SQLITE_VERSION}/jswasm/sqlite3-opfs-async-proxy.js" "$ASSETS_DIR/"
 
 # Clean up

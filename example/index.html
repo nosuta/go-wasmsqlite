@@ -167,10 +167,9 @@
 Loading WebAssembly module...</div>
     </div>
 
-    <!-- SQLite WASM Worker1 Promiser -->
-    <script src="sqlite3-worker1-promiser.js"></script>
-    <script src="sqlite-bridge.js"></script>
-    
+    <!-- SQLite WASM (_loader for sqlite3InitModule, used by the Go WASM driver) -->
+    <script src="sqlite3.js"></script>
+
     <script src="wasm_exec.js"></script>
     <script>
         let wasmReady = false;

@@ -17,10 +17,7 @@ func TestEmbeddedAssets(t *testing.T) {
 	expectedFiles := []string{
 		"assets/sqlite3.wasm",
 		"assets/sqlite3.js",
-		"assets/sqlite3-worker1.js",
-		"assets/sqlite3-worker1-promiser.js",
 		"assets/sqlite3-opfs-async-proxy.js",
-		"bridge/sqlite-bridge.js",
 	}
 
 	for _, expected := range expectedFiles {
@@ -52,14 +49,6 @@ func TestEmbeddedAssets(t *testing.T) {
 	if len(js) == 0 {
 		t.Error("SQLite JS is empty")
 	}
-
-	bridge, err := GetBridgeJS()
-	if err != nil {
-		t.Errorf("Failed to get Bridge JS: %v", err)
-	}
-	if len(bridge) == 0 {
-		t.Error("Bridge JS is empty")
-	}
 }
 
 func TestExtractAssets(t *testing.T) {
@@ -80,7 +69,6 @@ func TestExtractAssets(t *testing.T) {
 	expectedFiles := []string{
 		"assets/sqlite3.wasm",
 		"assets/sqlite3.js",
-		"bridge/sqlite-bridge.js",
 	}
 
 	for _, file := range expectedFiles {

@@ -4,23 +4,28 @@ package wasmsqlite
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
 	"sync"
 	"syscall/js"
 )
 
-// APIOO adapts the JavaScript SQLite OO API to work with our Go driver
+// APIOO adapts the JavaScript SQLite OO API to work with our Go driver.
+// It uses sqlite3.oo1.OpfsDb (or sqlite3.oo1.DB) directly inside the Go
+// WASM Worker, so SQLite and Go share the same Worker thread and there
+// is no nested Worker bridge.
 type APIOO struct {
 	sqlite   js.Value
 	database js.Value
 	mu       sync.Mutex
 }
 
-// NewAPIOO creates a new OO API
+// NewAPIOO creates a new OO API.
 func NewAPIOO() (*APIOO, error) {
 	return &APIOO{}, nil
 }
 
-// Init initializes OO API
+// Init initializes OO API.
 func (b *APIOO) Init() error {
 	if !b.sqlite.IsNull() && !b.sqlite.IsUndefined() {
 		return nil
@@ -37,7 +42,7 @@ func (b *APIOO) Init() error {
 	return nil
 }
 
-// Open opens a database
+// Open opens a database.
 func (b *APIOO) Open(path, vfs string) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -64,11 +69,11 @@ func (b *APIOO) Open(path, vfs string) (string, error) {
 	return "opfs", nil
 }
 
-// Exec executes a SQL statement
-func (b *APIOO) Exec(sql string, params []any) (rowsAffected int, lastInsertId int, err error) {
+// Exec executes a SQL statement.
+func (b *APIOO) Exec(sqlStr string, params []any) (rowsAffected int, lastInsertId int, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("%v", r)
+			err = fmt.Errorf("sqlite exec failed: %v", r)
 		}
 	}()
 	b.mu.Lock()
@@ -78,40 +83,31 @@ func (b *APIOO) Exec(sql string, params []any) (rowsAffected int, lastInsertId i
 		return 0, 0, fmt.Errorf("missing database")
 	}
 
-	// Convert params to JavaScript array
-	jsParams := js.Global().Get("Array").New()
-	for i, param := range params {
-		jsParams.SetIndex(i, toJSValue(param))
+	beforeChanges := b.database.Call("changes", true).Int()
+
+	stmt := b.database.Call("prepare", sqlStr)
+	defer stmt.Call("finalize")
+
+	jsParams, err := b.normalizeParams(stmt, params)
+	if err != nil {
+		return 0, 0, err
+	}
+	if !jsParams.IsUndefined() {
+		stmt.Call("bind", jsParams)
+	}
+	for stmt.Call("step").Bool() {
 	}
 
-	opts := map[string]any{
-		"sql":  sql,
-		"bind": jsParams,
-	}
-	b.database.Call("exec", opts)
-
-	opts = map[string]any{
-		"sql":         `SELECT changes() as changes, last_insert_rowid() as lastId;`,
-		"returnValue": "resultRows",
-	}
-	result := b.database.Call("exec", opts)
-
-	// Extract rowsAffected and lastInsertId
-	if !result.IsUndefined() && result.Length() > 0 {
-		res := result.Index(0)
-		if res.Length() == 2 {
-			rowsAffected = res.Index(0).Int()
-			lastInsertId = res.Index(1).Int()
-		}
-	}
+	rowsAffected = b.database.Call("changes", true).Int() - beforeChanges
+	lastInsertId = b.lastInsertRowID()
 	return rowsAffected, lastInsertId, err
 }
 
-// Query executes a query and returns results
-func (b *APIOO) Query(sql string, params []any) (columns []string, rows [][]any, err error) {
+// Query executes a query and returns results.
+func (b *APIOO) Query(sqlStr string, params []any) (columns []string, rows [][]any, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("%v", r)
+			err = fmt.Errorf("sqlite query failed: %v", r)
 		}
 	}()
 	b.mu.Lock()
@@ -121,137 +117,230 @@ func (b *APIOO) Query(sql string, params []any) (columns []string, rows [][]any,
 		return nil, nil, fmt.Errorf("missing database")
 	}
 
-	// Convert params to JavaScript array
-	jsParams := js.Global().Get("Array").New()
-	for i, param := range params {
-		jsParams.SetIndex(i, toJSValue(param))
+	stmt := b.database.Call("prepare", sqlStr)
+	defer stmt.Call("finalize")
+
+	jsParams, err := b.normalizeParams(stmt, params)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !jsParams.IsUndefined() {
+		stmt.Call("bind", jsParams)
 	}
 
-	opts := map[string]any{
-		"sql":         sql,
-		"bind":        jsParams,
-		"returnValue": "resultRows",
-	}
-	rowsJS := b.database.Call("exec", opts)
+	columns = b.readColumnNames(stmt)
 
-	columnCount := 0
-	if !rowsJS.IsUndefined() && rowsJS.Length() > 0 {
-		rows = make([][]any, rowsJS.Length())
-		for i := 0; i < rowsJS.Length(); i++ {
-			r := rowsJS.Index(i)
-			if r.Length() > 0 {
-				columnCount = r.Length()
-				row := make([]any, r.Length())
-				for j := 0; j < r.Length(); j++ {
-					val := r.Index(j)
-					if val.IsNull() {
-						row[j] = nil
-					} else if val.Type() == js.TypeNumber {
-						num := val.Float()
-						// If it's a whole number, return as int64 to match SQLite integer types
-						if num == float64(int64(num)) {
-							row[j] = int64(num)
-						} else {
-							row[j] = num
-						}
-					} else if val.Type() == js.TypeString {
-						row[j] = val.String()
-					} else if val.Type() == js.TypeBoolean {
-						row[j] = val.Bool()
-					} else if val.Type() == js.TypeObject && val.Get("constructor").Get("name").String() == "Uint8Array" {
-						b := make([]byte, val.Length())
-						js.CopyBytesToGo(b, val)
-						row[j] = b
-					} else {
-						row[j] = val.String()
-					}
-				}
-				rows[i] = row
-			}
+	for stmt.Call("step").Bool() {
+		rowJS := stmt.Call("get", js.Null())
+		row := make([]any, rowJS.Length())
+		for j := 0; j < rowJS.Length(); j++ {
+			row[j] = normalizeResultValue(rowJS.Index(j))
 		}
+		rows = append(rows, row)
 	}
-
-	// dummy columns
-	columns = make([]string, columnCount)
 
 	return columns, rows, err
 }
 
-// Begin starts a transaction
+// Begin starts a transaction.
 func (b *APIOO) Begin() (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("%v", r)
+			err = fmt.Errorf("sqlite begin failed: %v", r)
 		}
 	}()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	opts := map[string]any{
-		"sql": `BEGIN IMMEDIATE;`,
-	}
-	b.database.Call("exec", opts)
-
-	return err
+	b.database.Call("exec", map[string]any{"sql": "BEGIN IMMEDIATE;"})
+	return nil
 }
 
-// Commit commits a transaction
+// Commit commits a transaction.
 func (b *APIOO) Commit() (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("%v", r)
+			err = fmt.Errorf("sqlite commit failed: %v", r)
 		}
 	}()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	opts := map[string]any{
-		"sql": `COMMIT;`,
-	}
-	b.database.Call("exec", opts)
-
-	return err
+	b.database.Call("exec", map[string]any{"sql": "COMMIT;"})
+	return nil
 }
 
-// Rollback rolls back a transaction
+// Rollback rolls back a transaction.
 func (b *APIOO) Rollback() (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("%v", r)
+			err = fmt.Errorf("sqlite rollback failed: %v", r)
 		}
 	}()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	opts := map[string]any{
-		"sql": `ROLLBACK;`,
-	}
-	b.database.Call("exec", opts)
-
-	return err
+	b.database.Call("exec", map[string]any{"sql": "ROLLBACK;"})
+	return nil
 }
 
-// Close closes the database connection
+// Close closes the database connection.
 func (b *APIOO) Close() (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("%v", r)
+			err = fmt.Errorf("sqlite close failed: %v", r)
 		}
 	}()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	b.database.Call("close")
-
-	return err
+	return nil
 }
 
-// Dump exports the database as SQL statements
+// Dump exports the database as SQL statements.
 func (b *APIOO) Dump() (string, error) {
 	return "", fmt.Errorf("unimplemented")
 }
 
-// Load imports SQL statements to restore the database
+// Load imports SQL statements to restore the database.
 func (b *APIOO) Load(dump string) error {
 	return fmt.Errorf("unimplemented")
+}
+
+// --- helpers ported from upstream sqlite-worker.js ---
+
+var numericParamRE = regexp.MustCompile(`^[:@$?]([1-9][0-9]*)$`)
+
+func numericParamIndex(name string) int {
+	m := numericParamRE.FindStringSubmatch(name)
+	if m == nil {
+		return 0
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+func (b *APIOO) normalizeParams(stmt js.Value, params []any) (js.Value, error) {
+	if len(params) == 0 {
+		return js.Undefined(), nil
+	}
+
+	// remap positional params: each SQLite bind slot i (1..parameterCount)
+	// receives params[numericIndex($N)-1] when named $N, otherwise
+	// params[i-1]. Without this, SQLite's array-bind ties params to slots
+	// by textual order-of-first-appearance, mis-binding $N that appear out
+	// of order (e.g. UPDATE ... SET col=$3 WHERE k=$1).
+	paramCount := 0
+	if pc := stmt.Get("parameterCount"); !pc.IsUndefined() {
+		paramCount = pc.Int()
+	} else {
+		// Methods/getters aren't canonical in oo1; fall back to integer read.
+		paramCount = stmt.Call("getParameterCount").Int()
+	}
+
+	normalized := make([]any, 0, paramCount)
+	used := make(map[int]bool, len(params))
+
+	for i := 1; i <= paramCount; i++ {
+		bindName := ""
+		if name := stmt.Call("getParamName", i); !name.IsUndefined() && !name.IsNull() {
+			bindName = name.String()
+		}
+
+		var idx int
+		if n := numericParamIndex(bindName); n > 0 {
+			idx = n - 1
+		} else {
+			idx = i - 1
+		}
+
+		if idx < 0 || idx >= len(params) {
+			return js.Undefined(), fmt.Errorf("missing SQL parameter for %s", bindName)
+		}
+		normalized = append(normalized, params[idx])
+		used[idx] = true
+	}
+
+	for i := range params {
+		if !used[i] {
+			return js.Undefined(), fmt.Errorf("unused SQL parameter at index %d", i+1)
+		}
+	}
+
+	// pack into a JS array
+	arr := js.Global().Get("Array").New(len(normalized))
+	for i, v := range normalized {
+		arr.SetIndex(i, toJSValue(v))
+	}
+	return arr, nil
+}
+
+func (b *APIOO) readColumnNames(stmt js.Value) []string {
+	colCount := 0
+	if cc := stmt.Get("columnCount"); !cc.IsUndefined() {
+		colCount = cc.Int()
+	} else {
+		colCount = stmt.Call("getColumnCount").Int()
+	}
+	if colCount <= 0 {
+		return []string{}
+	}
+	colArr := stmt.Call("getColumnNames", js.Global().Get("Array").New())
+	out := make([]string, colArr.Length())
+	for i := 0; i < colArr.Length(); i++ {
+		out[i] = colArr.Index(i).String()
+	}
+	return out
+}
+
+func (b *APIOO) lastInsertRowID() int {
+	// Read via SQLite's last_insert_rowid() SQL function so we don't depend
+	// on touching capi internals from the Go side.
+	stmt := b.database.Call("prepare", "SELECT last_insert_rowid() AS id;")
+	defer stmt.Call("finalize")
+	if !stmt.Call("step").Bool() {
+		return 0
+	}
+	row := stmt.Call("get", js.Null())
+	if row.Length() == 0 {
+		return 0
+	}
+	v := row.Index(0)
+	if v.Type() == js.TypeNumber {
+		return v.Int()
+	}
+	return 0
+}
+
+func normalizeResultValue(val js.Value) any {
+	if val.IsNull() {
+		return nil
+	}
+	switch val.Type() {
+	case js.TypeNumber:
+		num := val.Float()
+		if num == float64(int64(num)) {
+			return int64(num)
+		}
+		return num
+	case js.TypeString:
+		return val.String()
+	case js.TypeBoolean:
+		return val.Bool()
+	case js.TypeObject:
+		// Uint8Array -> []byte (BLOB)
+		c := val.Get("constructor")
+		if !c.IsUndefined() && c.Get("name").String() == "Uint8Array" {
+			out := make([]byte, val.Length())
+			js.CopyBytesToGo(out, val)
+			return out
+		}
+		return val.String()
+	default:
+		return val.String()
+	}
 }
