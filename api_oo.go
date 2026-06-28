@@ -55,13 +55,13 @@ func (b *APIOO) Open(path, vfs string) (string, error) {
 		return "opfs", nil
 	}
 
-	opfs := b.sqlite.Get("opfs")
-	if opfs.IsUndefined() {
+	opfsDb := b.sqlite.Get("oo1").Get("OpfsDb")
+	if opfsDb.IsUndefined() {
 		return "", fmt.Errorf("OPFS is not supported")
 	}
 	fmt.Printf("🔍 sqlite3 version: %s\n", b.sqlite.Get("version").Get("libVersion").String())
 
-	db := b.sqlite.Get("oo1").Get("OpfsDb").New(path, "c")
+	db := opfsDb.New(path, "c")
 	if db.IsNull() || db.IsUndefined() {
 		return "", fmt.Errorf("failed to create database")
 	}
@@ -131,7 +131,7 @@ func (b *APIOO) Query(sqlStr string, params []any) (columns []string, rows [][]a
 	columns = b.readColumnNames(stmt)
 
 	for stmt.Call("step").Bool() {
-		rowJS := stmt.Call("get", js.Null())
+		rowJS := stmt.Call("get", js.Global().Get("Array").New())
 		row := make([]any, rowJS.Length())
 		for j := 0; j < rowJS.Length(); j++ {
 			row[j] = normalizeResultValue(rowJS.Index(j))
@@ -298,18 +298,12 @@ func (b *APIOO) readColumnNames(stmt js.Value) []string {
 }
 
 func (b *APIOO) lastInsertRowID() int {
-	// Read via SQLite's last_insert_rowid() SQL function so we don't depend
-	// on touching capi internals from the Go side.
 	stmt := b.database.Call("prepare", "SELECT last_insert_rowid() AS id;")
 	defer stmt.Call("finalize")
 	if !stmt.Call("step").Bool() {
 		return 0
 	}
-	row := stmt.Call("get", js.Null())
-	if row.Length() == 0 {
-		return 0
-	}
-	v := row.Index(0)
+	v := stmt.Call("get", 0)
 	if v.Type() == js.TypeNumber {
 		return v.Int()
 	}
