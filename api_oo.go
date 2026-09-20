@@ -85,6 +85,18 @@ func (b *APIOO) Exec(sqlStr string, params []any) (rowsAffected int, lastInsertI
 
 	beforeChanges := b.database.Call("changes", true).Int()
 
+	// With no bound parameters, run the statement(s) through the OO exec(),
+	// which executes every statement in the string. The prepare/step path
+	// below compiles only the first statement, so multi-statement DDL
+	// (schema migrations such as "CREATE TABLE ...; CREATE INDEX ...") would
+	// otherwise silently drop everything after the first semicolon.
+	if len(params) == 0 {
+		b.database.Call("exec", map[string]any{"sql": sqlStr})
+		rowsAffected = b.database.Call("changes", true).Int() - beforeChanges
+		lastInsertId = b.lastInsertRowID()
+		return rowsAffected, lastInsertId, nil
+	}
+
 	stmt := b.database.Call("prepare", sqlStr)
 	defer stmt.Call("finalize")
 
