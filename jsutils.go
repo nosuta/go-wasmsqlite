@@ -88,7 +88,6 @@ func callAsync(method js.Value, args ...any) (js.Value, error) {
 					errorMsg = error.String()
 				}
 			}
-			fmt.Printf("🔍 JavaScript error details: %s\n", errorMsg)
 		}
 
 		done <- struct {

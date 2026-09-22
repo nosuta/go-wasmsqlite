@@ -59,7 +59,6 @@ func (b *APIOO) Open(path, vfs string) (string, error) {
 	if opfsDb.IsUndefined() {
 		return "", fmt.Errorf("OPFS is not supported")
 	}
-	fmt.Printf("🔍 sqlite3 version: %s\n", b.sqlite.Get("version").Get("libVersion").String())
 
 	db := opfsDb.New(path, "c")
 	if db.IsNull() || db.IsUndefined() {
@@ -208,16 +207,6 @@ func (b *APIOO) Close() (err error) {
 
 	b.database.Call("close")
 	return nil
-}
-
-// Dump exports the database as SQL statements.
-func (b *APIOO) Dump() (string, error) {
-	return "", fmt.Errorf("unimplemented")
-}
-
-// Load imports SQL statements to restore the database.
-func (b *APIOO) Load(dump string) error {
-	return fmt.Errorf("unimplemented")
 }
 
 // --- helpers ported from upstream sqlite-worker.js ---

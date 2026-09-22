@@ -1,54 +1,15 @@
-# MCP configuration
-.mcp.json
-
 # Build artifacts
 *.wasm
-main.wasm
 wasm_exec.js
 
 # Node.js
 node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-package-lock.json
-
-# TypeScript build output
-worker/dist/
-*.js.map
 
 # IDE
+.DS_Store
 .vscode/
 .idea/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Test coverage
-coverage/
-*.lcov
-
-# Temporary files
-*.tmp
-*.temp
-.cache/
 
 # Local environment
 .env
 .env.local
-
-# Example build artifacts (but keep source)
-example/main.wasm
-example/wasm_exec.js
-example/*.wasm
-
-# Keep essential SQLite files in assets/
-!assets/*.wasm
-!assets/*.js
-
-# Playwright artifacts
-.playwright-mcp/
-
-# Conductor (old experiments)
-.conductor/

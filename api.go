@@ -12,6 +12,4 @@ type API interface {
 	Commit() error
 	Rollback() error
 	Close() error
-	Dump() (string, error)
-	Load(dump string) error
 }

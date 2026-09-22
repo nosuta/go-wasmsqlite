@@ -47,14 +47,10 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create OO adapter: %w", err)
 	}
-	vfsType, err := oo.Open(opts.File, opts.VFS)
-	if err != nil {
+	if _, err := oo.Open(opts.File, opts.VFS); err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
-	return &Conn{
-		api:     oo,
-		vfsType: vfsType,
-	}, nil
+	return &Conn{api: oo}, nil
 }
 
 // Driver returns the underlying driver
@@ -64,9 +60,8 @@ func (c *Connector) Driver() driver.Driver {
 
 // Conn implements the database/sql/driver.Conn interface
 type Conn struct {
-	api     API
-	inTx    bool
-	vfsType string
+	api  API
+	inTx bool
 }
 
 // Prepare implements driver.Conn
@@ -161,12 +156,6 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 		return nil, err
 	}
 
-	fmt.Printf("Query returned %d columns: %v\n", len(columns), columns)
-	fmt.Printf("Query returned %d rows\n", len(rows))
-	if len(rows) > 0 {
-		fmt.Printf("First row: %v\n", rows[0])
-	}
-
 	return &Rows{
 		columns: columns,
 		rows:    rows,
@@ -255,34 +244,4 @@ func (r *Result) RowsAffected() (int64, error) {
 		return 0, fmt.Errorf("no rows affected count available")
 	}
 	return *r.rowsAffected, nil
-}
-
-// GetVFSType returns the VFS type being used by the connection
-func (c *Conn) GetVFSType() VFSType {
-	switch c.vfsType {
-	case "opfs":
-		return VFSTypeOPFS
-	case "memory":
-		return VFSTypeMemory
-	default:
-		return VFSTypeUnknown
-	}
-}
-
-// Dump exports the database as SQL statements
-func (c *Conn) Dump(ctx context.Context) (string, error) {
-	if c.api == nil {
-		return "", driver.ErrBadConn
-	}
-
-	return c.api.Dump()
-}
-
-// Load imports SQL statements to restore the database
-func (c *Conn) Load(ctx context.Context, dump string) error {
-	if c.api == nil {
-		return driver.ErrBadConn
-	}
-
-	return c.api.Load(dump)
 }
