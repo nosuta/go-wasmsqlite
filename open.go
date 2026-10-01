@@ -18,6 +18,11 @@ type Options struct {
 	File string
 	// VFS to use (default: "opfs").
 	VFS string
+	// UnlockASAP releases the OPFS sync access handle after each operation
+	// instead of holding it until the VFS goes idle. It trades I/O speed for a
+	// smaller window in which a page reload can race a held handle, so it is
+	// opt-in. Only meaningful for the OPFS VFS.
+	UnlockASAP bool
 }
 
 // DefaultOptions returns default options for opening a database.
@@ -30,7 +35,8 @@ func DefaultOptions() *Options {
 
 // parseDSN parses a DSN string into options. The godash sqlite wrapper opens
 // the driver as "file=<path>"; the file value may carry a trailing query
-// string, which is stripped.
+// string, which is stripped. Extra options are read as sibling query
+// parameters, e.g. "file=/app.db&unlock-asap=1" or "file=/app.db&vfs=opfs".
 func parseDSN(dsn string) (*Options, error) {
 	opts := DefaultOptions()
 
@@ -52,6 +58,11 @@ func parseDSN(dsn string) (*Options, error) {
 
 	if vfs := values.Get("vfs"); vfs != "" {
 		opts.VFS = vfs
+	}
+
+	switch strings.ToLower(values.Get("unlock-asap")) {
+	case "1", "true", "yes", "on":
+		opts.UnlockASAP = true
 	}
 
 	return opts, nil

@@ -47,6 +47,7 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create OO adapter: %w", err)
 	}
+	oo.unlockASAP = opts.UnlockASAP
 	if _, err := oo.Open(opts.File, opts.VFS); err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}

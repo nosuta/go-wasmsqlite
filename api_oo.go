@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall/js"
 )
@@ -18,6 +19,9 @@ type APIOO struct {
 	sqlite   js.Value
 	database js.Value
 	mu       sync.Mutex
+	// unlockASAP releases the OPFS sync access handle after each operation.
+	// Set before Open.
+	unlockASAP bool
 }
 
 // NewAPIOO creates a new OO API.
@@ -42,7 +46,10 @@ func (b *APIOO) Init() error {
 	return nil
 }
 
-// Open opens a database.
+// Open opens a database. When unlockASAP is set, the OPFS VFS is told to
+// release its synchronous access handle after each operation (the
+// SQLite "opfs-unlock-asap" URI flag) instead of holding it until the VFS is
+// idle, so a page reload cannot race a held handle.
 func (b *APIOO) Open(path, vfs string) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -60,7 +67,19 @@ func (b *APIOO) Open(path, vfs string) (string, error) {
 		return "", fmt.Errorf("OPFS is not supported")
 	}
 
-	db := opfsDb.New(path, "c")
+	name := path
+	if b.unlockASAP {
+		separator := "?"
+		if strings.Contains(name, "?") {
+			separator = "&"
+		}
+		if !strings.HasPrefix(name, "file:") {
+			name = "file:" + name
+		}
+		name += separator + "opfs-unlock-asap=1"
+	}
+
+	db := opfsDb.New(name, "c")
 	if db.IsNull() || db.IsUndefined() {
 		return "", fmt.Errorf("failed to create database")
 	}
